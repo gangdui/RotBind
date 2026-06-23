@@ -13,8 +13,9 @@ import csv
 import inspect
 import math
 import os
+import importlib
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
@@ -63,6 +64,23 @@ CSV_FIELDS = [
     "alpha_hat",
 ]
 
+SUMMARY_FIELDS = [
+    "alpha",
+    "mean_angle_error",
+    "max_angle_error",
+    "failure_rate_error_gt_1deg",
+    "failure_rate_error_gt_3deg",
+    "mean_psnr_sync",
+    "mean_ssim_sync",
+    "mean_anchor_oracle_score",
+    "mean_anchor_sync_score",
+    "mean_anchor_remove_score",
+    "mean_vae_mse_sync",
+    "mean_vae_cos_sync",
+]
+
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
+
 _SSIM_HAS_CHANNEL_AXIS = "channel_axis" in inspect.signature(structural_similarity).parameters
 
 
@@ -75,6 +93,22 @@ def load_rgb_image(path: Path, size: Optional[int] = None) -> np.ndarray:
     if size is not None:
         img = img.resize((size, size), Image.Resampling.BICUBIC)
     return (np.asarray(img).astype(np.float32) / 255.0).clip(0.0, 1.0)
+
+
+def collect_inputs(args: argparse.Namespace) -> List[Tuple[str, np.ndarray]]:
+    resize_size = None if args.no_resize else args.size
+    if args.image_dir:
+        image_dir = Path(args.image_dir)
+        paths = sorted(
+            path for path in image_dir.iterdir() if path.suffix.lower() in IMAGE_EXTENSIONS
+        )
+        if not paths:
+            raise ValueError(f"No png/jpg/jpeg images found in {image_dir}")
+        return [(path.stem, load_rgb_image(path, size=resize_size)) for path in paths]
+    if args.image:
+        path = Path(args.image)
+        return [(path.stem, load_rgb_image(path, size=resize_size))]
+    return [("synthetic", make_synthetic_image(args.size, key=args.key))]
 
 
 def make_synthetic_image(size: int, key: int = 0) -> np.ndarray:
@@ -129,6 +163,35 @@ def mse(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.mean((np.asarray(a, dtype=np.float32) - np.asarray(b, dtype=np.float32)) ** 2))
 
 
+def to_numpy(x) -> np.ndarray:
+    if hasattr(x, "detach"):
+        x = x.detach()
+    if hasattr(x, "cpu"):
+        x = x.cpu()
+    return np.asarray(x, dtype=np.float32)
+
+
+def resolve_vae_encoder(args: argparse.Namespace) -> Optional[Callable[[np.ndarray], np.ndarray]]:
+    if not args.enable_vae_metrics:
+        return None
+
+    dotted = args.vae_encoder or os.environ.get("FREQ_ANCHOR_VAE_ENCODER")
+    if not dotted:
+        raise RuntimeError(
+            "--enable-vae-metrics requires a project VAE encode hook. "
+            "Pass --vae-encoder module:function or set FREQ_ANCHOR_VAE_ENCODER."
+        )
+    if ":" not in dotted:
+        raise ValueError("VAE encoder hook must be in module:function format")
+
+    module_name, function_name = dotted.split(":", 1)
+    module = importlib.import_module(module_name)
+    encoder = getattr(module, function_name)
+    if not callable(encoder):
+        raise TypeError(f"VAE encoder hook {dotted} is not callable")
+    return encoder
+
+
 def angular_error(theta_hat: float, theta_gt: float) -> float:
     return abs(((theta_hat - theta_gt + 180.0) % 360.0) - 180.0)
 
@@ -142,6 +205,61 @@ def write_csv(path: Path, rows: Sequence[Dict[str, float]]) -> None:
         writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def write_summary_csv(path: Path, rows: Sequence[Dict[str, float]]) -> List[Dict[str, float]]:
+    summary_rows = summarize_by_alpha(rows)
+    with path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=SUMMARY_FIELDS)
+        writer.writeheader()
+        writer.writerows(summary_rows)
+    return summary_rows
+
+
+def finite_values(rows: Sequence[Dict[str, float]], key: str) -> List[float]:
+    values = []
+    for row in rows:
+        value = float(row[key])
+        if not math.isnan(value):
+            values.append(value)
+    return values
+
+
+def mean_or_nan(values: Sequence[float]) -> float:
+    return math.nan if not values else float(np.mean(values))
+
+
+def summarize_by_alpha(rows: Sequence[Dict[str, float]]) -> List[Dict[str, float]]:
+    summary_rows = []
+    for alpha in sorted({float(row["alpha"]) for row in rows}):
+        subset = [row for row in rows if float(row["alpha"]) == alpha]
+        angle_errors = finite_values(subset, "angle_error")
+        n = len(angle_errors)
+        summary_rows.append(
+            {
+                "alpha": alpha,
+                "mean_angle_error": mean_or_nan(angle_errors),
+                "max_angle_error": math.nan if not angle_errors else float(np.max(angle_errors)),
+                "failure_rate_error_gt_1deg": math.nan
+                if not n
+                else float(np.mean([err > 1.0 for err in angle_errors])),
+                "failure_rate_error_gt_3deg": math.nan
+                if not n
+                else float(np.mean([err > 3.0 for err in angle_errors])),
+                "mean_psnr_sync": mean_or_nan(finite_values(subset, "psnr_sync")),
+                "mean_ssim_sync": mean_or_nan(finite_values(subset, "ssim_sync")),
+                "mean_anchor_oracle_score": mean_or_nan(
+                    finite_values(subset, "anchor_oracle_score")
+                ),
+                "mean_anchor_sync_score": mean_or_nan(finite_values(subset, "anchor_sync_score")),
+                "mean_anchor_remove_score": mean_or_nan(
+                    finite_values(subset, "anchor_remove_score")
+                ),
+                "mean_vae_mse_sync": mean_or_nan(finite_values(subset, "vae_mse_sync")),
+                "mean_vae_cos_sync": mean_or_nan(finite_values(subset, "vae_cos_sync")),
+            }
+        )
+    return summary_rows
 
 
 def plot_line(
@@ -201,6 +319,59 @@ def plot_metric_vs_alpha(
     plt.close()
 
 
+def plot_angle_error_box_by_alpha(path: Path, rows: Sequence[Dict[str, float]]) -> None:
+    alphas = sorted({float(row["alpha"]) for row in rows})
+    data = [[float(row["angle_error"]) for row in rows if float(row["alpha"]) == alpha] for alpha in alphas]
+    plt.figure(figsize=(6, 4))
+    plt.boxplot(data, labels=[f"{alpha:g}" for alpha in alphas], showmeans=True)
+    plt.title("Angle error by alpha")
+    plt.xlabel("alpha")
+    plt.ylabel("absolute angular error (deg)")
+    plt.grid(True, axis="y", alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(path, dpi=160)
+    plt.close()
+
+
+def plot_anchor_sync_vs_oracle_by_alpha(path: Path, rows: Sequence[Dict[str, float]]) -> None:
+    summary_rows = summarize_by_alpha(rows)
+    xs = [float(row["alpha"]) for row in summary_rows]
+    oracle = [float(row["mean_anchor_oracle_score"]) for row in summary_rows]
+    sync = [float(row["mean_anchor_sync_score"]) for row in summary_rows]
+    removed = [float(row["mean_anchor_remove_score"]) for row in summary_rows]
+    plt.figure(figsize=(6, 4))
+    plt.plot(xs, oracle, marker="o", linewidth=1.8, label="anchor_oracle")
+    plt.plot(xs, sync, marker="o", linewidth=1.8, label="anchor_sync")
+    plt.plot(xs, removed, marker="o", linewidth=1.8, label="anchor_remove")
+    plt.title("Anchor sync vs oracle by alpha")
+    plt.xlabel("alpha")
+    plt.ylabel("mean surrogate NCC score")
+    plt.grid(True, alpha=0.3)
+    plt.legend(fontsize=8)
+    plt.tight_layout()
+    plt.savefig(path, dpi=160)
+    plt.close()
+
+
+def plot_failure_rate_vs_alpha(path: Path, rows: Sequence[Dict[str, float]]) -> None:
+    summary_rows = summarize_by_alpha(rows)
+    xs = [float(row["alpha"]) for row in summary_rows]
+    gt1 = [float(row["failure_rate_error_gt_1deg"]) for row in summary_rows]
+    gt3 = [float(row["failure_rate_error_gt_3deg"]) for row in summary_rows]
+    plt.figure(figsize=(6, 4))
+    plt.plot(xs, gt1, marker="o", linewidth=1.8, label="error > 1 deg")
+    plt.plot(xs, gt3, marker="o", linewidth=1.8, label="error > 3 deg")
+    plt.title("Failure rate vs alpha")
+    plt.xlabel("alpha")
+    plt.ylabel("failure rate")
+    plt.ylim(-0.02, 1.02)
+    plt.grid(True, alpha=0.3)
+    plt.legend(fontsize=8)
+    plt.tight_layout()
+    plt.savefig(path, dpi=160)
+    plt.close()
+
+
 def save_example_grid(path: Path, examples: Sequence[Tuple[str, np.ndarray]]) -> None:
     cols = len(examples)
     plt.figure(figsize=(3 * cols, 3))
@@ -221,116 +392,139 @@ def run_eval(args: argparse.Namespace) -> List[Dict[str, float]]:
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    if args.image:
-        x_w = load_rgb_image(Path(args.image), size=args.size)
-        image_id = Path(args.image).stem
-    else:
-        x_w = make_synthetic_image(args.size, key=args.key)
-        image_id = "synthetic"
-
-    H, W = x_w.shape[:2]
+    inputs = collect_inputs(args)
     alphas = parse_float_list(args.alphas)
     angles = parse_float_list(args.angles)
-    delta, frequency_mask = make_anchor_template(
-        H,
-        W,
-        key=args.key,
-        rmin=args.rmin,
-        rmax=args.rmax,
-        circular_window=not args.no_circular_window,
-    )
-
-    save_rgb(outdir / "x_w.png", x_w)
-    save_delta_vis(outdir / "anchor_delta.png", delta)
+    vae_encoder = resolve_vae_encoder(args)
 
     rows: List[Dict[str, float]] = []
-    example_payload = None
-    total = len(alphas) * len(angles)
+    fallback_example_payload = None
+    selected_example_payload = None
+    total = len(inputs) * len(alphas) * len(angles)
     done = 0
 
-    for alpha in alphas:
-        x_sync = embed_anchor_rgb(x_w, delta, alpha=alpha)
-        save_rgb(outdir / f"x_sync_alpha_{alpha:g}.png", x_sync)
+    for image_id, x_w in inputs:
+        H, W = x_w.shape[:2]
+        delta, frequency_mask = make_anchor_template(
+            H,
+            W,
+            key=args.key,
+            rmin=args.rmin,
+            rmax=args.rmax,
+            circular_window=not args.no_circular_window,
+        )
 
-        psnr_sync = psnr(x_w, x_sync)
-        ssim_sync = ssim(x_w, x_sync)
-        vae_mse_sync = math.nan
-        vae_cos_sync = math.nan
-        zt_mse_sync = math.nan
-        zt_cos_sync = math.nan
+        save_rgb(outdir / f"x_w_{image_id}.png", x_w)
+        save_delta_vis(outdir / f"anchor_delta_{image_id}.png", delta)
+        if len(inputs) == 1:
+            save_rgb(outdir / "x_w.png", x_w)
+            save_delta_vis(outdir / "anchor_delta.png", delta)
 
-        for theta in angles:
-            x_att = rotate_image_keep_size(x_sync, theta, mode=args.rotate_mode)
-            theta_hat, best_score, _curve = detect_rotation_angle(
-                x_att,
-                delta,
-                frequency_mask,
-                coarse_step=args.coarse_step,
-                fine_step=args.fine_step,
-                angle_range=(args.angle_min, args.angle_max),
-                mode=args.rotate_mode,
-            )
-            x_corr = rotate_image_keep_size(x_att, -theta_hat, mode=args.rotate_mode)
-            x_corr_clean, alpha_hat = remove_anchor_rgb(
-                x_corr,
-                delta,
-                frequency_mask if args.remove_with_bandpass else None,
-            )
+        z0_w = to_numpy(vae_encoder(x_w)) if vae_encoder is not None else None
 
-            # Reserved for the real watermark/noise-space detector once the
-            # diffusion pipeline is connected.
-            base_score = math.nan
-            oracle_score = math.nan
-            anchorsync_score = math.nan
-            anchorsync_remove_score = math.nan
+        for alpha in alphas:
+            x_sync = embed_anchor_rgb(x_w, delta, alpha=alpha)
+            save_rgb(outdir / f"x_sync_{image_id}_alpha_{alpha:g}.png", x_sync)
 
-            anchor_base_score = surrogate_anchor_score(x_att, delta, frequency_mask)
-            anchor_oracle_img = rotate_image_keep_size(x_att, -theta, mode=args.rotate_mode)
-            anchor_oracle_score = surrogate_anchor_score(anchor_oracle_img, delta, frequency_mask)
-            anchor_sync_score = surrogate_anchor_score(x_corr, delta, frequency_mask)
-            anchor_remove_score = surrogate_anchor_score(x_corr_clean, delta, frequency_mask)
+            psnr_sync = psnr(x_w, x_sync)
+            ssim_sync = ssim(x_w, x_sync)
+            if vae_encoder is None:
+                vae_mse_sync = math.nan
+                vae_cos_sync = math.nan
+            else:
+                z0_sync = to_numpy(vae_encoder(x_sync))
+                vae_mse_sync = mse(z0_w, z0_sync)
+                vae_cos_sync = cosine_similarity(z0_w, z0_sync)
+            zt_mse_sync = math.nan
+            zt_cos_sync = math.nan
 
-            rows.append(
-                {
-                    "image_id": image_id,
-                    "alpha": alpha,
-                    "rmin": args.rmin,
-                    "rmax": args.rmax,
-                    "theta_gt": theta,
-                    "theta_hat": theta_hat,
-                    "angle_error": angular_error(theta_hat, theta),
-                    "ncc_score": best_score,
-                    "psnr_sync": psnr_sync,
-                    "ssim_sync": ssim_sync,
-                    "vae_mse_sync": vae_mse_sync,
-                    "vae_cos_sync": vae_cos_sync,
-                    "zt_mse_sync": zt_mse_sync,
-                    "zt_cos_sync": zt_cos_sync,
-                    "base_score": base_score,
-                    "oracle_score": oracle_score,
-                    "anchorsync_score": anchorsync_score,
-                    "anchorsync_remove_score": anchorsync_remove_score,
-                    "anchor_base_score": anchor_base_score,
-                    "anchor_oracle_score": anchor_oracle_score,
-                    "anchor_sync_score": anchor_sync_score,
-                    "anchor_remove_score": anchor_remove_score,
-                    "alpha_hat": alpha_hat,
-                }
-            )
+            for theta in angles:
+                x_att = rotate_image_keep_size(x_sync, theta, mode=args.rotate_mode)
+                theta_hat, best_score, _curve = detect_rotation_angle(
+                    x_att,
+                    delta,
+                    frequency_mask,
+                    coarse_step=args.coarse_step,
+                    fine_step=args.fine_step,
+                    angle_range=(args.angle_min, args.angle_max),
+                    mode=args.rotate_mode,
+                )
+                x_corr = rotate_image_keep_size(x_att, -theta_hat, mode=args.rotate_mode)
+                x_corr_clean, alpha_hat = remove_anchor_rgb(
+                    x_corr,
+                    delta,
+                    frequency_mask if args.remove_with_bandpass else None,
+                )
 
-            if example_payload is None:
-                example_payload = (
+                # Reserved for the real watermark/noise-space detector once the
+                # diffusion pipeline is connected.
+                base_score = math.nan
+                oracle_score = math.nan
+                anchorsync_score = math.nan
+                anchorsync_remove_score = math.nan
+
+                anchor_base_score = surrogate_anchor_score(x_att, delta, frequency_mask)
+                anchor_oracle_img = rotate_image_keep_size(x_att, -theta, mode=args.rotate_mode)
+                anchor_oracle_score = surrogate_anchor_score(
+                    anchor_oracle_img, delta, frequency_mask
+                )
+                anchor_sync_score = surrogate_anchor_score(x_corr, delta, frequency_mask)
+                anchor_remove_score = surrogate_anchor_score(x_corr_clean, delta, frequency_mask)
+
+                rows.append(
+                    {
+                        "image_id": image_id,
+                        "alpha": alpha,
+                        "rmin": args.rmin,
+                        "rmax": args.rmax,
+                        "theta_gt": theta,
+                        "theta_hat": theta_hat,
+                        "angle_error": angular_error(theta_hat, theta),
+                        "ncc_score": best_score,
+                        "psnr_sync": psnr_sync,
+                        "ssim_sync": ssim_sync,
+                        "vae_mse_sync": vae_mse_sync,
+                        "vae_cos_sync": vae_cos_sync,
+                        "zt_mse_sync": zt_mse_sync,
+                        "zt_cos_sync": zt_cos_sync,
+                        "base_score": base_score,
+                        "oracle_score": oracle_score,
+                        "anchorsync_score": anchorsync_score,
+                        "anchorsync_remove_score": anchorsync_remove_score,
+                        "anchor_base_score": anchor_base_score,
+                        "anchor_oracle_score": anchor_oracle_score,
+                        "anchor_sync_score": anchor_sync_score,
+                        "anchor_remove_score": anchor_remove_score,
+                        "alpha_hat": alpha_hat,
+                    }
+                )
+
+                candidate_payload = (
+                    x_w,
                     x_sync,
                     x_att,
                     x_corr,
                     x_corr_clean,
+                    delta,
                 )
+                if fallback_example_payload is None:
+                    fallback_example_payload = candidate_payload
+                if (
+                    selected_example_payload is None
+                    and abs(alpha - args.example_alpha) < 1e-12
+                    and abs(theta - args.example_theta) < 1e-12
+                ):
+                    selected_example_payload = candidate_payload
 
-            done += 1
-            if not args.no_show_progress:
-                print(f"[{done}/{total}] alpha={alpha:g} theta={theta:g} theta_hat={theta_hat:.2f}")
+                done += 1
+                if not args.no_show_progress:
+                    print(
+                        f"[{done}/{total}] image={image_id} alpha={alpha:g} "
+                        f"theta={theta:g} theta_hat={theta_hat:.2f}"
+                    )
 
     write_csv(outdir / "freq_anchor_results.csv", rows)
+    write_summary_csv(outdir / "summary.csv", rows)
 
     plot_line(
         outdir / "angle_error_vs_theta.png",
@@ -367,22 +561,19 @@ def run_eval(args: argparse.Namespace) -> List[Dict[str, float]]:
         "VAE MSE vs alpha",
         "VAE latent MSE",
     )
-    plot_metric_vs_alpha(
-        outdir / "zt_mse_vs_alpha.png",
-        rows,
-        "zt_mse_sync",
-        "z_T MSE vs alpha",
-        "DDIM inversion z_T MSE",
-    )
+    plot_angle_error_box_by_alpha(outdir / "angle_error_box_by_alpha.png", rows)
+    plot_anchor_sync_vs_oracle_by_alpha(outdir / "anchor_sync_vs_oracle_by_alpha.png", rows)
+    plot_failure_rate_vs_alpha(outdir / "failure_rate_vs_alpha.png", rows)
 
+    example_payload = selected_example_payload or fallback_example_payload
     if example_payload is not None:
-        x_sync, x_att, x_corr, x_corr_clean = example_payload
-        delta_vis = np.asarray(delta, dtype=np.float32)
+        x_w_example, x_sync, x_att, x_corr, x_corr_clean, delta_example = example_payload
+        delta_vis = np.asarray(delta_example, dtype=np.float32)
         delta_vis = (delta_vis - delta_vis.min()) / max(float(delta_vis.max() - delta_vis.min()), 1e-8)
         save_example_grid(
             outdir / "example_grid.png",
             [
-                ("original watermarked", x_w),
+                ("original watermarked", x_w_example),
                 ("anchor image", x_sync),
                 ("rotated attack", x_att),
                 ("corrected", x_corr),
@@ -397,10 +588,16 @@ def run_eval(args: argparse.Namespace) -> List[Dict[str, float]]:
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", default=None, help="Optional x_w RGB image path")
+    parser.add_argument(
+        "--image-dir",
+        default=None,
+        help="Optional directory of png/jpg/jpeg x_w images. Takes priority over --image.",
+    )
     parser.add_argument("--outdir", default="freq_anchor_eval", help="Output directory")
-    parser.add_argument("--size", type=int, default=256, help="Resize input or synthetic size")
+    parser.add_argument("--size", type=int, default=512, help="Resize input or synthetic size")
+    parser.add_argument("--no-resize", action="store_true", help="Keep input image dimensions")
     parser.add_argument("--key", type=int, default=0, help="Anchor random seed")
-    parser.add_argument("--alphas", default="0.001,0.002,0.003,0.005,0.008,0.01")
+    parser.add_argument("--alphas", default="0.001,0.002,0.003,0.005")
     parser.add_argument("--rmin", type=float, default=0.12)
     parser.add_argument("--rmax", type=float, default=0.28)
     parser.add_argument("--angles", default="5,10,15,30,45,60,75,90,120,150,180")
@@ -411,6 +608,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rotate-mode", choices=["reflect", "constant"], default="reflect")
     parser.add_argument("--no-circular-window", action="store_true")
     parser.add_argument("--remove-with-bandpass", action="store_true")
+    parser.add_argument("--example-alpha", type=float, default=0.003)
+    parser.add_argument("--example-theta", type=float, default=45.0)
+    parser.add_argument("--enable-vae-metrics", action="store_true")
+    parser.add_argument(
+        "--vae-encoder",
+        default=None,
+        help="Optional module:function hook that VAE-encodes an RGB float32 image.",
+    )
     parser.add_argument("--no-show-progress", action="store_true")
     return parser
 
