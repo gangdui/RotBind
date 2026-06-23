@@ -83,6 +83,7 @@ SUMMARY_FIELDS = [
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 
 _SSIM_HAS_CHANNEL_AXIS = "channel_axis" in inspect.signature(structural_similarity).parameters
+_PIL_BICUBIC = getattr(getattr(Image, "Resampling", Image), "BICUBIC", Image.BICUBIC)
 
 
 def parse_float_list(text: str) -> List[float]:
@@ -92,7 +93,7 @@ def parse_float_list(text: str) -> List[float]:
 def load_rgb_image(path: Path, size: Optional[int] = None) -> np.ndarray:
     img = Image.open(path).convert("RGB")
     if size is not None:
-        img = img.resize((size, size), Image.Resampling.BICUBIC)
+        img = img.resize((size, size), _PIL_BICUBIC)
     return (np.asarray(img).astype(np.float32) / 255.0).clip(0.0, 1.0)
 
 

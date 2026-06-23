@@ -172,6 +172,39 @@ class EvalFreqAnchorSmokeTest(unittest.TestCase):
             self.assertEqual(len(summary_rows), 1)
             self.assertEqual(summary_rows[0]["alpha"], "0.003")
 
+    def test_image_input_with_resize_supports_older_pillow(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_path = root / "single.png"
+            outdir = root / "out"
+            save_test_image(image_path, (48, 32))
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    "eval_freq_anchor.py",
+                    "--image",
+                    str(image_path),
+                    "--outdir",
+                    str(outdir),
+                    "--size",
+                    "64",
+                    "--alphas",
+                    "0.003",
+                    "--angles",
+                    "5",
+                    "--coarse-step",
+                    "5",
+                    "--fine-step",
+                    "1",
+                    "--no-show-progress",
+                ],
+                check=True,
+            )
+
+            with Image.open(outdir / "x_w_single.png") as img:
+                self.assertEqual(img.size, (64, 64))
+
     def test_enable_vae_metrics_uses_encoder_hook_without_zt_metrics(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
