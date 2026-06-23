@@ -40,7 +40,7 @@ class EvalFreqAnchorSmokeTest(unittest.TestCase):
 
             for name in [
                 "angle_error_vs_theta.png",
-                "detection_score_vs_theta.png",
+                "surrogate_anchor_score_vs_theta.png",
                 "quality_vs_alpha.png",
                 "vae_mse_vs_alpha.png",
                 "zt_mse_vs_alpha.png",

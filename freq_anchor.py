@@ -25,6 +25,14 @@ def _normalize_zero_mean_unit_std(x: np.ndarray) -> np.ndarray:
     return (x / std).astype(np.float32)
 
 
+def _bandpass_2d(x: np.ndarray, frequency_mask: np.ndarray) -> np.ndarray:
+    arr = np.asarray(x, dtype=np.float32)
+    mask = np.asarray(frequency_mask)
+    if arr.shape != mask.shape:
+        raise ValueError(f"Mask shape {mask.shape} does not match array {arr.shape}")
+    return np.fft.ifft2(np.fft.fft2(arr) * mask).real.astype(np.float32)
+
+
 def _rgb_to_ycbcr(img_rgb: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     img = np.asarray(img_rgb, dtype=np.float32)
     r = img[..., 0]
@@ -93,6 +101,7 @@ def make_anchor_template(
             np.float32
         )
         delta = (delta * window).astype(np.float32)
+        delta = _normalize_zero_mean_unit_std(delta)
 
     return delta.astype(np.float32), frequency_mask
 
@@ -119,7 +128,7 @@ def bandpass_y_channel(img_rgb: np.ndarray, frequency_mask: np.ndarray) -> np.nd
         raise ValueError(f"Mask shape {mask.shape} does not match image {img.shape[:2]}")
 
     y, _, _ = _rgb_to_ycbcr(img)
-    bandpassed = np.fft.ifft2(np.fft.fft2(y) * mask).real.astype(np.float32)
+    bandpassed = _bandpass_2d(y, mask)
     return _normalize_zero_mean_unit_std(bandpassed)
 
 
@@ -199,7 +208,13 @@ def detect_rotation_angle(
 
     coarse_angles = _angle_grid(angle_min, angle_max, float(coarse_step))
     coarse_scores = np.array(
-        [ncc(bandpassed_y, rotate_image_keep_size(delta_arr, theta, mode=mode)) for theta in coarse_angles],
+        [
+            ncc(
+                bandpassed_y,
+                _bandpass_2d(rotate_image_keep_size(delta_arr, theta, mode=mode), frequency_mask),
+            )
+            for theta in coarse_angles
+        ],
         dtype=np.float32,
     )
     best_coarse = float(coarse_angles[int(np.argmax(coarse_scores))])
@@ -208,7 +223,13 @@ def detect_rotation_angle(
     fine_max = min(angle_max, best_coarse + float(coarse_step))
     fine_angles = _angle_grid(fine_min, fine_max, float(fine_step))
     fine_scores = np.array(
-        [ncc(bandpassed_y, rotate_image_keep_size(delta_arr, theta, mode=mode)) for theta in fine_angles],
+        [
+            ncc(
+                bandpassed_y,
+                _bandpass_2d(rotate_image_keep_size(delta_arr, theta, mode=mode), frequency_mask),
+            )
+            for theta in fine_angles
+        ],
         dtype=np.float32,
     )
     best_idx = int(np.argmax(fine_scores))
@@ -241,11 +262,13 @@ def remove_anchor_rgb(
         mask = np.asarray(frequency_mask)
         if mask.shape != y.shape:
             raise ValueError(f"Mask shape {mask.shape} does not match image {y.shape}")
-        y_for_fit = np.fft.ifft2(np.fft.fft2(y) * mask).real.astype(np.float32)
-        delta_for_fit = np.fft.ifft2(np.fft.fft2(delta_arr) * mask).real.astype(np.float32)
+        y_for_fit = _bandpass_2d(y, mask)
+        delta_for_fit = _bandpass_2d(delta_arr, mask)
 
-    numerator = float(np.sum(y_for_fit * delta_for_fit))
-    denominator = float(np.sum(delta_for_fit * delta_for_fit))
+    y_fit_centered = y_for_fit - np.mean(y_for_fit)
+    delta_fit_centered = delta_for_fit - np.mean(delta_for_fit)
+    numerator = float(np.sum(y_fit_centered * delta_fit_centered))
+    denominator = float(np.sum(delta_fit_centered * delta_fit_centered))
     alpha_hat = 0.0 if denominator < EPS else numerator / denominator
 
     y_clean = np.clip(y - alpha_hat * delta_arr, 0.0, 1.0).astype(np.float32)

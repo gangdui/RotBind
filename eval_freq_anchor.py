@@ -329,11 +329,11 @@ def run_eval(args: argparse.Namespace) -> List[Dict[str, float]]:
         "absolute angular error (deg)",
     )
     plot_line(
-        outdir / "detection_score_vs_theta.png",
+        outdir / "surrogate_anchor_score_vs_theta.png",
         rows,
         "theta_gt",
         ["base_score", "oracle_score", "anchorsync_score", "anchorsync_remove_score"],
-        "Detection score vs theta",
+        "Surrogate anchor score vs theta",
         "surrogate NCC score",
     )
     plot_metric_vs_alpha(
