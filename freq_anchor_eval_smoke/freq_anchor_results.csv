@@ -1,0 +1,3 @@
+image_id,alpha,rmin,rmax,theta_gt,theta_hat,angle_error,ncc_score,psnr_sync,ssim_sync,vae_mse_sync,vae_cos_sync,zt_mse_sync,zt_cos_sync,base_score,oracle_score,anchorsync_score,anchorsync_remove_score,anchor_base_score,anchor_oracle_score,anchor_sync_score,anchor_remove_score,alpha_hat
+synthetic,0.003,0.12,0.28,15.0,15.0,0.0,0.14692087471485138,50.457576856900104,0.9955522432535894,nan,nan,nan,nan,nan,nan,nan,nan,-0.0313575454056263,0.08235505223274231,0.08235505223274231,-0.0028079808689653873,0.0016189857851713896
+synthetic,0.003,0.12,0.28,45.0,45.0,0.0,0.15844163298606873,50.457576856900104,0.9955522432535894,nan,nan,nan,nan,nan,nan,nan,nan,-0.025951582938432693,0.0855327770113945,0.0855327770113945,-0.0054749795235693455,0.001704332185909152
