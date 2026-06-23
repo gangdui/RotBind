@@ -56,6 +56,10 @@ CSV_FIELDS = [
     "oracle_score",
     "anchorsync_score",
     "anchorsync_remove_score",
+    "anchor_base_score",
+    "anchor_oracle_score",
+    "anchor_sync_score",
+    "anchor_remove_score",
     "alpha_hat",
 ]
 
@@ -273,14 +277,18 @@ def run_eval(args: argparse.Namespace) -> List[Dict[str, float]]:
                 frequency_mask if args.remove_with_bandpass else None,
             )
 
-            # Standalone surrogate scores. In the full project, replace these
-            # with original watermark/noise-space detection calls.
-            base_img = rotate_image_keep_size(x_w, theta, mode=args.rotate_mode)
-            oracle_img = rotate_image_keep_size(base_img, -theta, mode=args.rotate_mode)
-            base_score = surrogate_anchor_score(base_img, delta, frequency_mask)
-            oracle_score = surrogate_anchor_score(oracle_img, delta, frequency_mask)
-            anchorsync_score = surrogate_anchor_score(x_corr, delta, frequency_mask)
-            anchorsync_remove_score = surrogate_anchor_score(x_corr_clean, delta, frequency_mask)
+            # Reserved for the real watermark/noise-space detector once the
+            # diffusion pipeline is connected.
+            base_score = math.nan
+            oracle_score = math.nan
+            anchorsync_score = math.nan
+            anchorsync_remove_score = math.nan
+
+            anchor_base_score = surrogate_anchor_score(x_att, delta, frequency_mask)
+            anchor_oracle_img = rotate_image_keep_size(x_att, -theta, mode=args.rotate_mode)
+            anchor_oracle_score = surrogate_anchor_score(anchor_oracle_img, delta, frequency_mask)
+            anchor_sync_score = surrogate_anchor_score(x_corr, delta, frequency_mask)
+            anchor_remove_score = surrogate_anchor_score(x_corr_clean, delta, frequency_mask)
 
             rows.append(
                 {
@@ -302,6 +310,10 @@ def run_eval(args: argparse.Namespace) -> List[Dict[str, float]]:
                     "oracle_score": oracle_score,
                     "anchorsync_score": anchorsync_score,
                     "anchorsync_remove_score": anchorsync_remove_score,
+                    "anchor_base_score": anchor_base_score,
+                    "anchor_oracle_score": anchor_oracle_score,
+                    "anchor_sync_score": anchor_sync_score,
+                    "anchor_remove_score": anchor_remove_score,
                     "alpha_hat": alpha_hat,
                 }
             )
@@ -332,7 +344,12 @@ def run_eval(args: argparse.Namespace) -> List[Dict[str, float]]:
         outdir / "surrogate_anchor_score_vs_theta.png",
         rows,
         "theta_gt",
-        ["base_score", "oracle_score", "anchorsync_score", "anchorsync_remove_score"],
+        [
+            "anchor_base_score",
+            "anchor_oracle_score",
+            "anchor_sync_score",
+            "anchor_remove_score",
+        ],
         "Surrogate anchor score vs theta",
         "surrogate NCC score",
     )
