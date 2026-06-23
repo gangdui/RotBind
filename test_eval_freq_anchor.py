@@ -10,6 +10,9 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from eval_freq_anchor import aggregate_line_rows, surrogate_anchor_score
+from freq_anchor import bandpass_2d, bandpass_y_channel, make_anchor_template, ncc
+
 
 def save_test_image(path, size):
     y = np.linspace(0.0, 1.0, size[1], dtype=np.float32)
@@ -20,6 +23,34 @@ def save_test_image(path, size):
 
 
 class EvalFreqAnchorSmokeTest(unittest.TestCase):
+    def test_surrogate_anchor_score_bandpasses_image_and_template(self):
+        img = np.full((64, 64, 3), 0.5, dtype=np.float32)
+        delta, mask = make_anchor_template(64, 64, key=23, circular_window=True)
+        low_freq_bias = np.linspace(0.0, 1.0, 64, dtype=np.float32)[None, :]
+        biased_delta = delta + 10.0 * low_freq_bias
+
+        expected = ncc(bandpass_y_channel(img, mask), bandpass_2d(biased_delta, mask))
+
+        self.assertAlmostEqual(
+            surrogate_anchor_score(img, biased_delta, mask),
+            expected,
+            places=6,
+        )
+
+    def test_aggregate_line_rows_averages_by_alpha_and_theta(self):
+        rows = [
+            {"image_id": "a", "alpha": 0.1, "theta_gt": 5, "angle_error": 1.0},
+            {"image_id": "b", "alpha": 0.1, "theta_gt": 5, "angle_error": 3.0},
+            {"image_id": "a", "alpha": 0.1, "theta_gt": 10, "angle_error": 2.0},
+            {"image_id": "b", "alpha": 0.1, "theta_gt": 10, "angle_error": 4.0},
+        ]
+
+        aggregated = aggregate_line_rows(rows, "theta_gt", ["angle_error"])
+
+        self.assertEqual(len(aggregated), 2)
+        self.assertEqual([row["theta_gt"] for row in aggregated], [5.0, 10.0])
+        self.assertEqual([row["angle_error"] for row in aggregated], [2.0, 3.0])
+
     def test_eval_script_writes_csv_and_figures(self):
         with tempfile.TemporaryDirectory() as tmp:
             outdir = Path(tmp) / "out"

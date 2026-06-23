@@ -25,7 +25,9 @@ def _normalize_zero_mean_unit_std(x: np.ndarray) -> np.ndarray:
     return (x / std).astype(np.float32)
 
 
-def _bandpass_2d(x: np.ndarray, frequency_mask: np.ndarray) -> np.ndarray:
+def bandpass_2d(x: np.ndarray, frequency_mask: np.ndarray) -> np.ndarray:
+    """Bandpass a 2D array with the provided frequency mask."""
+
     arr = np.asarray(x, dtype=np.float32)
     mask = np.asarray(frequency_mask)
     if arr.shape != mask.shape:
@@ -128,7 +130,7 @@ def bandpass_y_channel(img_rgb: np.ndarray, frequency_mask: np.ndarray) -> np.nd
         raise ValueError(f"Mask shape {mask.shape} does not match image {img.shape[:2]}")
 
     y, _, _ = _rgb_to_ycbcr(img)
-    bandpassed = _bandpass_2d(y, mask)
+    bandpassed = bandpass_2d(y, mask)
     return _normalize_zero_mean_unit_std(bandpassed)
 
 
@@ -211,7 +213,7 @@ def detect_rotation_angle(
         [
             ncc(
                 bandpassed_y,
-                _bandpass_2d(rotate_image_keep_size(delta_arr, theta, mode=mode), frequency_mask),
+                bandpass_2d(rotate_image_keep_size(delta_arr, theta, mode=mode), frequency_mask),
             )
             for theta in coarse_angles
         ],
@@ -226,7 +228,7 @@ def detect_rotation_angle(
         [
             ncc(
                 bandpassed_y,
-                _bandpass_2d(rotate_image_keep_size(delta_arr, theta, mode=mode), frequency_mask),
+                bandpass_2d(rotate_image_keep_size(delta_arr, theta, mode=mode), frequency_mask),
             )
             for theta in fine_angles
         ],
@@ -262,8 +264,8 @@ def remove_anchor_rgb(
         mask = np.asarray(frequency_mask)
         if mask.shape != y.shape:
             raise ValueError(f"Mask shape {mask.shape} does not match image {y.shape}")
-        y_for_fit = _bandpass_2d(y, mask)
-        delta_for_fit = _bandpass_2d(delta_arr, mask)
+        y_for_fit = bandpass_2d(y, mask)
+        delta_for_fit = bandpass_2d(delta_arr, mask)
 
     y_fit_centered = y_for_fit - np.mean(y_for_fit)
     delta_fit_centered = delta_for_fit - np.mean(delta_for_fit)

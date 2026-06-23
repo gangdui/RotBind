@@ -1,0 +1,3 @@
+alpha,mean_angle_error,max_angle_error,failure_rate_error_gt_1deg,failure_rate_error_gt_3deg,mean_psnr_sync,mean_ssim_sync,mean_anchor_oracle_score,mean_anchor_sync_score,mean_anchor_remove_score,mean_vae_mse_sync,mean_vae_cos_sync
+0.001,125.0,125.0,1.0,1.0,60.18592768622741,0.9995288054584431,0.018296113858620327,0.022323879102865856,0.0006845132835830251,nan,nan
+0.003,0.0,0.0,0.0,0.0,50.668244192918486,0.9957943658746236,0.0644622618953387,0.0644622618953387,-0.0007024541652450959,nan,nan

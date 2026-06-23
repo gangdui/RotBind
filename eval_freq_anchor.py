@@ -28,6 +28,7 @@ from PIL import Image
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 
 from freq_anchor import (
+    bandpass_2d,
     bandpass_y_channel,
     detect_rotation_angle,
     embed_anchor_rgb,
@@ -197,7 +198,7 @@ def angular_error(theta_hat: float, theta_gt: float) -> float:
 
 
 def surrogate_anchor_score(img_rgb: np.ndarray, delta: np.ndarray, mask: np.ndarray) -> float:
-    return ncc(bandpass_y_channel(img_rgb, mask), delta)
+    return ncc(bandpass_y_channel(img_rgb, mask), bandpass_2d(delta, mask))
 
 
 def write_csv(path: Path, rows: Sequence[Dict[str, float]]) -> None:
@@ -262,6 +263,29 @@ def summarize_by_alpha(rows: Sequence[Dict[str, float]]) -> List[Dict[str, float
     return summary_rows
 
 
+def aggregate_line_rows(
+    rows: Sequence[Dict[str, float]],
+    x_key: str,
+    y_keys: Sequence[str],
+) -> List[Dict[str, float]]:
+    grouped: Dict[Tuple[float, float], Dict[str, List[float]]] = {}
+    for row in rows:
+        group_key = (float(row["alpha"]), float(row[x_key]))
+        grouped.setdefault(group_key, {y_key: [] for y_key in y_keys})
+        for y_key in y_keys:
+            value = float(row[y_key])
+            if not math.isnan(value):
+                grouped[group_key][y_key].append(value)
+
+    aggregated = []
+    for (alpha, x_value), values_by_key in sorted(grouped.items()):
+        row = {"alpha": alpha, x_key: x_value}
+        for y_key in y_keys:
+            row[y_key] = mean_or_nan(values_by_key[y_key])
+        aggregated.append(row)
+    return aggregated
+
+
 def plot_line(
     path: Path,
     rows: Sequence[Dict[str, float]],
@@ -271,10 +295,11 @@ def plot_line(
     ylabel: str,
 ) -> None:
     plt.figure(figsize=(7, 4))
-    alphas = sorted({float(row["alpha"]) for row in rows})
+    rows_for_plot = aggregate_line_rows(rows, x_key, y_keys)
+    alphas = sorted({float(row["alpha"]) for row in rows_for_plot})
     for y_key in y_keys:
         for alpha in alphas:
-            subset = [row for row in rows if float(row["alpha"]) == alpha]
+            subset = [row for row in rows_for_plot if float(row["alpha"]) == alpha]
             xs = [float(row[x_key]) for row in subset]
             ys = [float(row[y_key]) for row in subset]
             label = f"{y_key}, alpha={alpha:g}" if len(alphas) > 1 else y_key

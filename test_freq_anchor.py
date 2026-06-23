@@ -4,6 +4,7 @@ import numpy as np
 from scipy import ndimage
 
 from freq_anchor import (
+    bandpass_2d,
     bandpass_y_channel,
     detect_rotation_angle,
     embed_anchor_rgb,
@@ -86,6 +87,13 @@ class FreqAnchorTest(unittest.TestCase):
         band = bandpass_y_channel(sync, mask)
 
         self.assertGreater(ncc(band, delta), 0.95)
+
+    def test_bandpass_2d_is_exposed_for_templates(self):
+        delta, mask = make_anchor_template(48, 48, key=17, circular_window=True)
+        bandpassed = bandpass_2d(delta, mask)
+
+        self.assertEqual(bandpassed.shape, delta.shape)
+        self.assertEqual(bandpassed.dtype, np.float32)
 
     def test_detect_rotation_angle_uses_attack_sign_convention(self):
         img = np.full((96, 96, 3), 0.5, dtype=np.float32)
