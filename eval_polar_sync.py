@@ -45,7 +45,9 @@ from freq_anchor import (
 )
 from polar_sync import (
     detect_rotation_angle_polar,
+    embed_polar_magnitude_anchor_rgb,
     make_polar_anchor_template,
+    make_polar_magnitude_template,
     make_radial_window_freq,
 )
 
@@ -66,6 +68,11 @@ CSV_FIELDS = [
     "anchor_oracle_score",
     "anchor_sync_score",
     "anchor_remove_score",
+    "raw_shift",
+    "theta_mod",
+    "angle_bin",
+    "corr_margin",
+    "top2_score",
     "ambiguity_resolved",
     "candidate_score_0",
     "candidate_score_180",
@@ -91,6 +98,19 @@ def anchor_score(img_rgb: np.ndarray, delta: np.ndarray, rmin: float, rmax: floa
     H, W = delta.shape
     mask = make_radial_window_freq(H, W, rmin=rmin, rmax=rmax, soft=False)
     return ncc(bandpass_y_channel(img_rgb, mask), bandpass_2d(delta, mask))
+
+
+def normalize_proxy(x: np.ndarray) -> np.ndarray:
+    arr = np.asarray(x, dtype=np.float32)
+    arr = arr - float(arr.mean())
+    std = float(arr.std())
+    if std < 1e-8:
+        return np.zeros_like(arr, dtype=np.float32)
+    return (arr / std).astype(np.float32)
+
+
+def spatial_proxy_from_modulation(modulation_grid: np.ndarray) -> np.ndarray:
+    return normalize_proxy(np.fft.ifft2(modulation_grid).real.astype(np.float32))
 
 
 def finite_values(rows: Sequence[Dict[str, float]], key: str) -> List[float]:
@@ -310,6 +330,11 @@ def make_row(
     ambiguity_resolved=False,
     candidate_score_0=np.nan,
     candidate_score_180=np.nan,
+    raw_shift=np.nan,
+    theta_mod=np.nan,
+    angle_bin=np.nan,
+    corr_margin=np.nan,
+    top2_score=np.nan,
 ):
     oracle_img = rotate_image_keep_size(x_att, -theta)
     return {
@@ -328,6 +353,11 @@ def make_row(
         "anchor_oracle_score": anchor_score(oracle_img, delta, rmin, rmax),
         "anchor_sync_score": anchor_score(x_corr, delta, rmin, rmax),
         "anchor_remove_score": anchor_score(x_corr_clean, delta, rmin, rmax),
+        "raw_shift": raw_shift,
+        "theta_mod": theta_mod,
+        "angle_bin": angle_bin,
+        "corr_margin": corr_margin,
+        "top2_score": top2_score,
         "ambiguity_resolved": bool(ambiguity_resolved),
         "candidate_score_0": candidate_score_0,
         "candidate_score_180": candidate_score_180,
@@ -340,9 +370,7 @@ def run_eval(args: argparse.Namespace) -> List[Dict[str, float]]:
     inputs = collect_inputs(args)
     alphas = parse_float_list(args.alphas)
     angles = parse_float_list(args.angles)
-    methods = ["v1"]
-    if args.method == "v0":
-        methods = ["v0"]
+    methods = [args.method]
     if args.compare_v0 and "v0" not in methods:
         methods.append("v0")
 
@@ -355,7 +383,7 @@ def run_eval(args: argparse.Namespace) -> List[Dict[str, float]]:
     for image_id, x_w in inputs:
         save_rgb(outdir / f"x_w_{image_id}.png", x_w)
         H, W = x_w.shape[:2]
-        v1_delta, polar_template, _meta = make_polar_anchor_template(
+        additive_delta, additive_polar_template, _additive_meta = make_polar_anchor_template(
             H,
             W,
             key=args.key,
@@ -364,22 +392,49 @@ def run_eval(args: argparse.Namespace) -> List[Dict[str, float]]:
             num_angles=args.num_angles,
             beta=args.beta,
         )
+        magmod_grid, magmod_polar_template, _magmod_meta = make_polar_magnitude_template(
+            H,
+            W,
+            key=args.key,
+            rmin=args.rmin,
+            rmax=args.rmax,
+            num_angles=args.num_angles,
+            beta=args.beta,
+        )
+        magmod_delta = spatial_proxy_from_modulation(magmod_grid)
         v0_delta, v0_mask = make_anchor_template(
             H, W, key=args.key, rmin=args.rmin, rmax=args.rmax
         )
 
         if len(inputs) == 1:
-            save_delta_vis(outdir / "anchor_delta.png", v1_delta)
-        save_delta_vis(outdir / f"anchor_delta_{image_id}.png", v1_delta)
+            default_delta = (
+                magmod_delta
+                if args.method == "v1_magmod"
+                else additive_delta
+                if args.method == "v1_additive"
+                else v0_delta
+            )
+            save_delta_vis(outdir / "anchor_delta.png", default_delta)
+        save_delta_vis(outdir / f"anchor_delta_{image_id}_v1_magmod.png", magmod_delta)
+        save_delta_vis(outdir / f"anchor_delta_{image_id}_v1_additive.png", additive_delta)
 
         for alpha in alphas:
             per_method_sync = {
-                "v1": embed_anchor_rgb(x_w, v1_delta, alpha),
+                "v1_magmod": embed_polar_magnitude_anchor_rgb(x_w, magmod_grid, alpha),
+                "v1_additive": embed_anchor_rgb(x_w, additive_delta, alpha),
                 "v0": embed_anchor_rgb(x_w, v0_delta, alpha),
             }
             for method in methods:
                 x_sync = per_method_sync[method]
-                delta = v1_delta if method == "v1" else v0_delta
+                if method == "v1_magmod":
+                    delta = magmod_delta
+                    method_polar_template = magmod_polar_template
+                elif method == "v1_additive":
+                    delta = additive_delta
+                    method_polar_template = additive_polar_template
+                else:
+                    delta = v0_delta
+                    method_polar_template = None
                 psnr_sync = psnr(x_w, x_sync)
                 ssim_sync = ssim(x_w, x_sync)
                 save_rgb(outdir / f"x_sync_{image_id}_{method}_alpha_{alpha:g}.png", x_sync)
@@ -387,10 +442,10 @@ def run_eval(args: argparse.Namespace) -> List[Dict[str, float]]:
                 for theta in angles:
                     x_att = rotate_image_keep_size(x_sync, theta)
                     start = time.perf_counter()
-                    if method == "v1":
+                    if method in {"v1_magmod", "v1_additive"}:
                         theta_hat, best_score, _curve, extra = detect_rotation_angle_polar(
                             x_att,
-                            polar_template,
+                            method_polar_template,
                             delta=delta,
                             rmin=args.rmin,
                             rmax=args.rmax,
@@ -407,6 +462,11 @@ def run_eval(args: argparse.Namespace) -> List[Dict[str, float]]:
                             fine_step=args.v0_fine_step,
                         )
                         extra = {
+                            "raw_shift": np.nan,
+                            "theta_mod": np.nan,
+                            "angle_bin": np.nan,
+                            "corr_margin": np.nan,
+                            "top2_score": np.nan,
                             "ambiguity_resolved": False,
                             "candidate_score_0": np.nan,
                             "candidate_score_180": np.nan,
@@ -435,6 +495,11 @@ def run_eval(args: argparse.Namespace) -> List[Dict[str, float]]:
                             ambiguity_resolved=extra["ambiguity_resolved"],
                             candidate_score_0=extra["candidate_score_0"],
                             candidate_score_180=extra["candidate_score_180"],
+                            raw_shift=extra["raw_shift"],
+                            theta_mod=extra["theta_mod"],
+                            angle_bin=extra["angle_bin"],
+                            corr_margin=extra["corr_margin"],
+                            top2_score=extra["top2_score"],
                         )
                     )
 
@@ -443,7 +508,7 @@ def run_eval(args: argparse.Namespace) -> List[Dict[str, float]]:
                         fallback_example = example_payload
                     if (
                         selected_example is None
-                        and method == "v1"
+                        and method == args.method
                         and abs(alpha - args.example_alpha) < 1e-12
                         and abs(theta - args.example_theta) < 1e-12
                     ):
@@ -497,7 +562,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--key", type=int, default=0)
     parser.add_argument("--example-alpha", type=float, default=0.003)
     parser.add_argument("--example-theta", type=float, default=45.0)
-    parser.add_argument("--method", choices=["v1", "v0"], default="v1")
+    parser.add_argument(
+        "--method",
+        choices=["v1_magmod", "v1_additive", "v0"],
+        default="v1_magmod",
+    )
     parser.add_argument("--compare-v0", action="store_true")
     parser.add_argument("--num-r", type=int, default=64)
     parser.add_argument("--num-angles", type=int, default=360)

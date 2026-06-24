@@ -40,15 +40,20 @@ class EvalPolarSyncSmokeTest(unittest.TestCase):
             self.assertTrue(csv_path.exists())
             with csv_path.open(newline="") as f:
                 rows = list(csv.DictReader(f))
-            self.assertEqual({row["method"] for row in rows}, {"v0", "v1"})
+            self.assertEqual({row["method"] for row in rows}, {"v0", "v1_magmod"})
             self.assertEqual(len(rows), 2)
             for row in rows:
                 self.assertIn("runtime_ms", row)
                 self.assertIn("angle_error", row)
+                self.assertIn("raw_shift", row)
+                self.assertIn("theta_mod", row)
+                self.assertIn("corr_margin", row)
 
             with (outdir / "summary.csv").open(newline="") as f:
                 summary_rows = list(csv.DictReader(f))
-            self.assertEqual({row["method"] for row in summary_rows}, {"v0", "v1"})
+            self.assertEqual(
+                {row["method"] for row in summary_rows}, {"v0", "v1_magmod"}
+            )
 
             for name in [
                 "angle_error_vs_theta.png",

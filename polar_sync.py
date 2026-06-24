@@ -43,6 +43,33 @@ def _rgb_to_y(img_rgb: np.ndarray) -> np.ndarray:
     ).astype(np.float32)
 
 
+def _validate_rgb(img_rgb: np.ndarray) -> np.ndarray:
+    img = np.asarray(img_rgb, dtype=np.float32)
+    if img.ndim != 3 or img.shape[-1] != 3:
+        raise ValueError(f"Expected RGB image with shape (H, W, 3), got {img.shape}")
+    return img
+
+
+def _rgb_to_ycbcr(img_rgb: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    img = _validate_rgb(img_rgb)
+    r = img[..., 0]
+    g = img[..., 1]
+    b = img[..., 2]
+    y = 0.299 * r + 0.587 * g + 0.114 * b
+    cb = -0.168736 * r - 0.331264 * g + 0.5 * b + 0.5
+    cr = 0.5 * r - 0.418688 * g - 0.081312 * b + 0.5
+    return y.astype(np.float32), cb.astype(np.float32), cr.astype(np.float32)
+
+
+def _ycbcr_to_rgb(y: np.ndarray, cb: np.ndarray, cr: np.ndarray) -> np.ndarray:
+    cb_shift = cb - 0.5
+    cr_shift = cr - 0.5
+    r = y + 1.402 * cr_shift
+    g = y - 0.344136 * cb_shift - 0.714136 * cr_shift
+    b = y + 1.772 * cb_shift
+    return np.clip(np.stack([r, g, b], axis=-1), 0.0, 1.0).astype(np.float32)
+
+
 def make_angular_code(num_angles: int, key: int = 0, mode: str = "rademacher") -> np.ndarray:
     """Generate a normalized pseudo-random angular code."""
 
@@ -108,6 +135,15 @@ def _angle_code_on_grid(H: int, W: int, code: np.ndarray) -> np.ndarray:
     return code[bins].astype(np.float32)
 
 
+def _pi_periodic_angular_code(num_angles: int, key: int) -> np.ndarray:
+    half_angles = max(1, num_angles // 2)
+    half_code = make_angular_code(half_angles, key=key)
+    angular_code = np.tile(half_code, 2)
+    if angular_code.size < num_angles:
+        angular_code = np.append(angular_code, angular_code[: num_angles - angular_code.size])
+    return angular_code[:num_angles].astype(np.float32)
+
+
 def make_polar_anchor_template(
     H: int,
     W: int,
@@ -121,12 +157,7 @@ def make_polar_anchor_template(
 
     if num_angles <= 0:
         raise ValueError("num_angles must be positive")
-    half_angles = max(1, num_angles // 2)
-    half_code = make_angular_code(half_angles, key=key)
-    angular_code = np.tile(half_code, 2)
-    if angular_code.size < num_angles:
-        angular_code = np.append(angular_code, angular_code[: num_angles - angular_code.size])
-    angular_code = angular_code[:num_angles].astype(np.float32)
+    angular_code = _pi_periodic_angular_code(num_angles, key)
 
     radial = make_radial_window_freq(H, W, rmin=rmin, rmax=rmax, soft=True)
     angular_grid = _angle_code_on_grid(H, W, angular_code)
@@ -158,6 +189,72 @@ def make_polar_anchor_template(
         "ambiguity": "180deg",
     }
     return delta.astype(np.float32), polar_template.astype(np.float32), metadata
+
+
+def make_polar_magnitude_template(
+    H: int,
+    W: int,
+    key: int = 0,
+    rmin: float = 0.12,
+    rmax: float = 0.28,
+    num_angles: int = 360,
+    beta: float = 1.0,
+):
+    """Create a V1.1 frequency-magnitude modulation anchor template.
+
+    ``modulation_grid`` is defined on the unshifted FFT grid so it can be
+    multiplied directly with ``np.fft.fft2(Y)``. Its angular code is pi-periodic,
+    which keeps the real-valued image Hermitian symmetry but leaves the expected
+    180 degree ambiguity for the optional resolver.
+    """
+
+    if H <= 0 or W <= 0:
+        raise ValueError("H and W must be positive")
+    if num_angles <= 0:
+        raise ValueError("num_angles must be positive")
+
+    angular_code = _pi_periodic_angular_code(num_angles, key)
+    radial = make_radial_window_freq(H, W, rmin=rmin, rmax=rmax, soft=True)
+    angular_grid = _angle_code_on_grid(H, W, angular_code)
+    modulation_grid = (radial * float(beta) * angular_grid).astype(np.float32)
+    modulation_grid = modulation_grid - float(modulation_grid.mean())
+    max_abs = float(np.max(np.abs(modulation_grid)))
+    if max_abs > EPS:
+        modulation_grid = modulation_grid / max_abs
+    modulation_grid[0, 0] = 0.0
+
+    polar_template = np.tile(angular_code[None, :], (64, 1)).astype(np.float32)
+    polar_template = polar_template - polar_template.mean(axis=1, keepdims=True)
+    polar_template = polar_template / np.maximum(
+        polar_template.std(axis=1, keepdims=True), EPS
+    )
+    metadata = {
+        "method": "v1_magmod",
+        "rmin": rmin,
+        "rmax": rmax,
+        "num_angles": num_angles,
+        "beta": beta,
+        "key": key,
+        "ambiguity": "180deg",
+    }
+    return modulation_grid.astype(np.float32), polar_template.astype(np.float32), metadata
+
+
+def embed_polar_magnitude_anchor_rgb(
+    img_rgb: np.ndarray, modulation_grid: np.ndarray, alpha: float
+) -> np.ndarray:
+    """Embed an angular code by modulating luminance FFT magnitudes."""
+
+    y, cb, cr = _rgb_to_ycbcr(img_rgb)
+    grid = np.asarray(modulation_grid, dtype=np.float32)
+    if grid.shape != y.shape:
+        raise ValueError(f"Modulation grid shape {grid.shape} does not match image {y.shape}")
+
+    F = np.fft.fft2(y)
+    gain = np.clip(1.0 + float(alpha) * grid, 0.1, 10.0).astype(np.float32)
+    y_sync = np.fft.ifft2(F * gain).real.astype(np.float32)
+    y_sync = np.clip(y_sync, 0.0, 1.0).astype(np.float32)
+    return _ycbcr_to_rgb(y_sync, cb, cr)
 
 
 def fft_polar_magnitude(
@@ -290,10 +387,19 @@ def detect_rotation_angle_polar(
     raw_shift = angle_bin * 360.0 / float(num_angles)
     theta_mod = (-raw_shift) % 180.0
     theta_hat = theta_mod
+    if score_curve.size > 1:
+        top2_score = float(np.partition(score_curve, -2)[-2])
+    else:
+        top2_score = np.nan
+    corr_margin = (
+        float(best_score - top2_score) if not np.isnan(top2_score) else np.nan
+    )
     extra = {
         "angle_bin": angle_bin,
         "raw_shift": raw_shift,
         "theta_mod": theta_mod,
+        "top2_score": top2_score,
+        "corr_margin": corr_margin,
         "ambiguity_resolved": False,
         "candidate_score_0": np.nan,
         "candidate_score_180": np.nan,
